@@ -3,13 +3,15 @@ name: CI
 on:
   workflow_dispatch:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build:
     runs-on: windows-latest
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Download bore
         shell: powershell
@@ -36,18 +38,13 @@ jobs:
             -Name "UserAuthentication" `
             -Value 1
 
-      - name: Create RDP User
+      - name: Create User
         shell: powershell
         run: |
-          $username = "rdpuser"
-          $password = "Password123!"
+          net user rdpuser Password123! /add
+          net localgroup "Remote Desktop Users" rdpuser /add
 
-          $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
-
-          net user $username $password /add
-          net localgroup "Remote Desktop Users" $username /add
-
-      - name: Start bore tunnel
+      - name: Start bore
         shell: powershell
         run: |
           Start-Process `
@@ -64,17 +61,17 @@ jobs:
               $port = $matches[1]
 
               Write-Host ""
-              Write-Host "=============================="
-              Write-Host "RDP LOGIN"
-              Write-Host "=============================="
+              Write-Host "==========================="
+              Write-Host "RDP LOGIN INFO"
+              Write-Host "==========================="
               Write-Host "HOST: bore.pub"
               Write-Host "PORT: $port"
-              Write-Host "USERNAME: rdpuser"
-              Write-Host "PASSWORD: Password123!"
-              Write-Host "=============================="
+              Write-Host "USER: rdpuser"
+              Write-Host "PASS: Password123!"
+              Write-Host "==========================="
           }
           else {
-              Write-Host "Failed to detect bore port"
+              Write-Host "Tunnel failed"
               Get-Content bore.txt
               exit 1
           }
@@ -83,6 +80,6 @@ jobs:
         shell: powershell
         run: |
           while ($true) {
-            Write-Host "Runner alive: $(Get-Date)"
             Start-Sleep -Seconds 60
+            Write-Host "Alive $(Get-Date)"
           }
