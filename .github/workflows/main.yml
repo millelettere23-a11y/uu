@@ -1,85 +1,117 @@
 name: CI
 
-on:
-  workflow_dispatch:
-
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+on: [push, workflow_dispatch]
 
 jobs:
   build:
     runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
       - name: Download bore
-        shell: powershell
         run: |
-          Invoke-WebRequest `
-            -Uri "https://github.com/ekzhang/bore/releases/download/v0.6.0/bore-v0.6.0-x86_64-pc-windows-msvc.zip" `
-            -OutFile "bore.zip"
-
-          Expand-Archive bore.zip -DestinationPath .
+          $url = "https://github.com/ekzhang/bore/releases/download/v0.6.0/bore-v0.6.0-x86_64-pc-windows-msvc.zip"
+          Invoke-WebRequest -Uri $url -OutFile bore.zip -UseBasicParsing
+          Expand-Archive -Path bore.zip -DestinationPath .
           Remove-Item bore.zip
 
       - name: Enable RDP
-        shell: powershell
         run: |
-          Set-ItemProperty `
-            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-            -Name "fDenyTSConnections" `
-            -Value 0
-
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -Value 0
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -Value 1
 
-          Set-ItemProperty `
-            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-            -Name "UserAuthentication" `
-            -Value 1
-
-      - name: Create User
-        shell: powershell
+      - name: Setup RDP user
         run: |
-          net user rdpuser Password123! /add
-          net localgroup "Remote Desktop Users" rdpuser /add
+          $securePassword = ConvertTo-SecureString "QKTDhc6%6qyRZbGc" -AsPlainText -Force
+          New-LocalUser -Name "otruser111989" -Password $securePassword -FullName "OnetimeRDP - t.me/OnetimeRDP_bot" -AccountNeverExpires -PasswordNeverExpires
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "otruser111989"
 
-      - name: Start bore
-        shell: powershell
+      - name: Start bore and capture port
         run: |
-          Start-Process `
-            -FilePath ".\bore.exe" `
-            -ArgumentList "local 3389 --to bore.pub" `
-            -RedirectStandardOutput "bore.txt" `
-            -NoNewWindow
+          $boreOutput = Join-Path $PWD "bore_out.txt"
+          $proc = Start-Process -FilePath ".\bore.exe" -ArgumentList "local 3389 --to bore.pub" -NoNewWindow -RedirectStandardOutput $boreOutput -RedirectStandardError "$PWD\bore_err.txt" -PassThru
+          $port = $null
+          $timeout = 120
+          $sw = [System.Diagnostics.Stopwatch]::StartNew()
 
-          Start-Sleep -Seconds 10
+          while ($port -eq $null -and $sw.Elapsed.TotalSeconds -lt $timeout -and !$proc.HasExited) {
+            Start-Sleep -Seconds 1
 
-          $content = Get-Content bore.txt -Raw
+            if (Test-Path $boreOutput) {
+              $content = Get-Content $boreOutput -Raw -ErrorAction SilentlyContinue
 
-          if ($content -match "bore.pub:(\d+)") {
-              $port = $matches[1]
-
-              Write-Host ""
-              Write-Host "==========================="
-              Write-Host "RDP LOGIN INFO"
-              Write-Host "==========================="
-              Write-Host "HOST: bore.pub"
-              Write-Host "PORT: $port"
-              Write-Host "USER: rdpuser"
-              Write-Host "PASS: Password123!"
-              Write-Host "==========================="
-          }
-          else {
-              Write-Host "Tunnel failed"
-              Get-Content bore.txt
-              exit 1
+              if ($content -match ':(\d{4,5})') {
+                $port = $matches[1]
+              }
+            }
           }
 
-      - name: Keep Alive
-        shell: powershell
+          if ($proc.HasExited -or $port -eq $null) {
+            exit 1
+          }
+
+          $credContent = @"
+          SERVER=bore.pub
+          PORT=$port
+          USERNAME=otruser111989
+          PASSWORD=QKTDhc6%6qyRZbGc
+          "@
+
+          $credContent | Out-File -FilePath rdp_credentials.txt -Encoding ascii
+          $proc.Id | Out-File -FilePath bore_pid.txt
+
+      - name: Upload RDP credentials
+        uses: actions/upload-artifact@v4
+        with:
+          name: rdp-credentials
+          path: rdp_credentials.txt
+
+      - name: Keep bore tunnel alive
         run: |
+          $borePidFile = Join-Path $PWD "bore_pid.txt"
+
           while ($true) {
-            Start-Sleep -Seconds 60
-            Write-Host "Alive $(Get-Date)"
+            if (Test-Path $borePidFile) {
+              $borePid = Get-Content $borePidFile -Raw
+              $boreProc = Get-Process -Id $borePid -ErrorAction SilentlyContinue
+
+              if (-not $boreProc -or $boreProc.HasExited) {
+                Write-Host "$(Get-Date -Format 'HH:mm:ss') - Bore died, restarting..."
+
+                $currentPort = $null
+
+                if (Test-Path rdp_credentials.txt) {
+                  $creds = Get-Content rdp_credentials.txt -Raw
+
+                  if ($creds -match 'PORT=(\d+)') {
+                    $currentPort = $Matches[1]
+                  }
+                }
+
+                if ($currentPort) {
+                  $newProc = Start-Process -FilePath ".\bore.exe" -ArgumentList "local 3389 --to bore.pub --port $currentPort" -NoNewWindow -RedirectStandardOutput bore_out.txt -RedirectStandardError bore_err.txt -PassThru
+                } else {
+                  $newProc = Start-Process -FilePath ".\bore.exe" -ArgumentList "local 3389 --to bore.pub" -NoNewWindow -RedirectStandardOutput bore_out.txt -RedirectStandardError bore_err.txt -PassThru
+                }
+
+                $newProc.Id | Out-File -FilePath $borePidFile
+
+                Write-Host "$(Get-Date -Format 'HH:mm:ss') - Bore restarted with PID: $($newProc.Id)"
+              } else {
+                Write-Host "$(Get-Date -Format 'HH:mm:ss') - Bore is running (PID: $borePid)"
+              }
+            }
+
+            Start-Sleep -Seconds 30
           }
+
+      - name: Upload logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: execution-logs
+          path: |
+            *.log
+            *.txt
